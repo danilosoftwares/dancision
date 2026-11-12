@@ -1,0 +1,65 @@
+{
+  "name": "dancision",
+  "version": "0.1.0",
+  "description": "Semantic decision framework based on embeddings, cosine similarity, and thresholds. It does not use a generative LLM.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./pgvector": {
+      "types": "./dist/vector-store/pgvector/index.d.ts",
+      "import": "./dist/vector-store/pgvector/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "keywords": [
+    "embeddings",
+    "semantic-search",
+    "decision",
+    "cosine-similarity",
+    "pgvector"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "example:basic": "tsx examples/basic/index.ts",
+    "example:salon": "tsx examples/salon-erp/index.ts",
+    "example:states": "tsx examples/multiple-states/index.ts",
+    "example:custom": "tsx examples/custom-provider/index.ts",
+    "example:salon-local": "tsx examples/salon-erp-local/index.ts"
+  },
+  "peerDependencies": {
+    "@huggingface/transformers": "^3.0.0",
+    "pg": "^8.13.0"
+  },
+  "peerDependenciesMeta": {
+    "@huggingface/transformers": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
