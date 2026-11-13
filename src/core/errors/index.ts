@@ -8,6 +8,19 @@ export class DecisionEngineError extends Error {
   }
 }
 
+export class VersionConflictError extends DecisionEngineError {
+  constructor(
+    readonly stateId: string,
+    readonly expectedVersion: number,
+    readonly actualVersion: number | null,
+  ) {
+    super(
+      `State ${stateId} changed since it was read. Expected version ${expectedVersion}, found ${actualVersion ?? "none"}. Read the State again and retry.`,
+      "VERSION_CONFLICT",
+    );
+  }
+}
+
 export class StateNotFoundError extends DecisionEngineError {
   constructor(readonly stateId: string) {
     super(`State not found: ${stateId}`, "STATE_NOT_FOUND");

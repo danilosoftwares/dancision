@@ -37,6 +37,12 @@ export class InMemoryVectorStore implements VectorStore {
       if (stored.stateId !== input.stateId || stored.modelId !== input.modelId) {
         continue;
       }
+      if (input.polarity !== undefined && stored.polarity !== input.polarity) {
+        continue;
+      }
+      if (input.knowledgeIds !== undefined && !input.knowledgeIds.includes(stored.knowledgeId)) {
+        continue;
+      }
       if (
         stored.dimensions !== input.vector.length ||
         stored.vector.length !== input.vector.length

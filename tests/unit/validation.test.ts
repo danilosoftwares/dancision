@@ -20,6 +20,7 @@ describe("thresholds and scale", () => {
   it("rejects a negative margin and an invalid topK", () => {
     expect(() => resolveThresholds({ evidenceMargin: -0.1 })).toThrow(InvalidThresholdError);
     expect(() => resolveThresholds({ topK: 0 })).toThrow(InvalidThresholdError);
+    expect(() => resolveThresholds({ negativeTopK: -1 })).toThrow(InvalidThresholdError);
   });
 
   it("rejects an inverted scale", () => {

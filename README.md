@@ -249,7 +249,7 @@ Every answer also includes `explanation`.
 
 Returns `YES`, `NO`, or `UNDETERMINED`.
 
-1. Search brings up to `topK` knowledge items from the State.
+1. Search reads positive, negative, and neutral knowledge separately, up to `topK` items in each group. `positiveTopK`, `negativeTopK`, and `neutralTopK` override that group. A question with categories only searches knowledge in those categories.
 2. `similarity.positive` and `similarity.negative` are the highest cosines of each polarity, including items below the threshold.
 3. An item votes only when its cosine is greater than or equal to `minSimilarity`, its weight is greater than zero, and its categories match the question. Neutral items do not vote. Relevance is cosine times weight.
 4. The default aggregation sums the relevance of each side. `mean` and `peak` are alternatives. The sum can exceed 1 and is not a probability.
@@ -305,7 +305,7 @@ The defaults are not a MiniLM calibration and not a 50% rule:
 
 Pass a partial object to the constructor. The engine tests use planted vectors and explicit thresholds. With a real model, measure paraphrases, unrelated topics, similar options, and positive/negative pairs before fixing the numbers.
 
-`topK` limits what the decision sees. Contradictory evidence outside that window does not enter the calculation.
+`topK` is the default size of each polarity window. A contrary item outside the positive window can still enter the decision. `positiveTopK`, `negativeTopK`, and `neutralTopK` set a different limit for one group. `0` skips that group. A custom `retrieval` on the engine can replace this policy.
 
 `choiceEvidenceWeight` 0 ignores the State when ranking options. A high weight lets knowledge overcome the proximity between question and option. The `minSimilarity` gate still applies to the selected option.
 
@@ -313,7 +313,7 @@ A margin of 0 stops a zero gap from being a contradiction when `conflictResoluti
 
 ## Structured State
 
-The same State answers several questions without resending the knowledge. The version starts at 1 and increases on every mutation. `decide` does not change the version.
+The same State answers several questions without resending the knowledge. The version starts at 1 and increases on every mutation. `decide` does not change the version. A mutation is saved only when the stored version still matches the version that was read. Otherwise the operation throws `VersionConflictError` and the caller reads the State again and retries. When the State repository and the vector store share a PostgreSQL connection, the State row and its embeddings are written in one transaction. Otherwise a failed write removes or restores the partial records.
 
 Besides knowledge, the State stores domain, metadata, categories, relations, and constraints. Each knowledge item can have categories, weight, priority, and source. Changing only those fields does not generate an embedding again.
 
@@ -418,7 +418,7 @@ It compares cosine ranges. It does not require an exact MiniLM decision.
 - Neutral knowledge does not vote. Knowledge without an explicit polarity must be stored as `positive`, `negative`, or `neutral` by someone who knows the domain.
 - Score is a rescaling of an aggregate or a gap. Do not publish that number as confidence.
 - The default thresholds are a starting point. A calibration grid on the same set used to measure is optimistic.
-- `topK` can hide weaker evidence.
+- Each polarity has its own `topK` window. Evidence below that window for its polarity can still be missed. `0` on a group limit skips that group.
 - This package does not alter the Postgres `vector(N)` column. New State columns are added with `ADD COLUMN` and a default value.
 - The local provider is heavy and downloads files on the first run. Deterministic tests and examples do not depend on it.
 

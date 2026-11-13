@@ -8,6 +8,9 @@ export interface DecisionThresholds {
   contradictionMargin: number;
   choiceMargin: number;
   topK: number;
+  positiveTopK?: number;
+  negativeTopK?: number;
+  neutralTopK?: number;
   choiceEvidenceWeight: number;
   aggregation: AggregationMethod;
   conflictResolution: ConflictResolution;

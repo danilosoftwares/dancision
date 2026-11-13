@@ -5,6 +5,7 @@ import {
   type PgSchemaConfig,
 } from "./identifiers.js";
 import { PgStateRepository } from "./pg-state-repository.js";
+import { PgTransactionCoordinator } from "./pg-transaction.js";
 import { PgVectorStore } from "./pg-vector-store.js";
 import { ensurePgSchema } from "./schema.js";
 
@@ -46,9 +47,10 @@ export function createPgStores(
 ): { states: PgStateRepository; vectors: PgVectorStore } {
   const config = resolvePgSchemaConfig(options);
   const ready = createSchemaReady(db, config);
+  const transactions = new PgTransactionCoordinator(db, ready);
   return {
-    states: new PgStateRepository(db, config, ready),
-    vectors: new PgVectorStore(db, config, ready),
+    states: new PgStateRepository(db, config, ready, transactions),
+    vectors: new PgVectorStore(db, config, ready, transactions),
   };
 }
 

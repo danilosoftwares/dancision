@@ -10,7 +10,10 @@ import {
   KnowledgeNotFoundError,
   PersistenceError,
   StateNotFoundError,
+  VersionConflictError,
 } from "../core/errors/index.js";
+import type { PersistenceSession } from "../core/persistence/transaction.js";
+import { sharedTransaction } from "../core/persistence/transaction.js";
 import type { KnowledgeInput, KnowledgePatch, KnowledgeRecord } from "../core/types/knowledge.js";
 import { knowledgeAttributes } from "../core/types/knowledge.js";
 import type { StateInput, StatePatch, StateRecord } from "../core/types/state.js";
@@ -64,15 +67,12 @@ export class StateManager {
       updatedAt: timestamp,
     };
 
-    await this.repository.save(record);
-    try {
+    await this.transaction(async (session) => {
+      await this.insertState(record, session);
       if (indexed.vectors.length > 0) {
-        await this.vectors.upsertMany(indexed.vectors);
+        await this.writeEach(indexed.vectors, session);
       }
-    } catch (error) {
-      await this.repository.delete(record.id);
-      throw error;
-    }
+    });
 
     return clone(record);
   }
@@ -128,7 +128,7 @@ export class StateManager {
     if (metadata === undefined) {
       delete updated.metadata;
     }
-    await this.repository.save(updated);
+    await this.commit(state, updated, async () => {}, async () => {});
     return clone(updated);
   }
 
@@ -149,10 +149,11 @@ export class StateManager {
     }
 
     const updated = this.withKnowledge(state, [...state.knowledge, record]);
-    await this.persist(
+    await this.commit(
+      state,
       updated,
-      async () => {
-        await this.vectors.upsert(vector);
+      async (session) => {
+        await this.vectors.upsert(vector, session);
       },
       async () => {
         await this.vectors.delete(stateId, input.id);
@@ -231,10 +232,11 @@ export class StateManager {
         ...knowledgeAttributes(merged),
       };
       deleteEmptyAttributes(nextVector);
-      await this.persist(
+      await this.commit(
+        state,
         updated,
-        async () => {
-          await this.vectors.upsert(nextVector);
+        async (session) => {
+          await this.vectors.upsert(nextVector, session);
         },
         async () => {
           await this.vectors.upsert(stored);
@@ -257,10 +259,11 @@ export class StateManager {
       ...knowledgeAttributes(merged),
     };
     deleteEmptyAttributes(nextVector);
-    await this.persist(
+    await this.commit(
+      state,
       updated,
-      async () => {
-        await this.vectors.upsert(nextVector);
+      async (session) => {
+        await this.vectors.upsert(nextVector, session);
       },
       async () => {
         await this.vectors.upsert(stored);
@@ -285,10 +288,11 @@ export class StateManager {
       },
       knowledge,
     );
-    await this.persist(
+    await this.commit(
+      state,
       updated,
-      async () => {
-        await this.vectors.delete(stateId, knowledgeId);
+      async (session) => {
+        await this.vectors.delete(stateId, knowledgeId, session);
       },
       async () => {
         if (stored) {
@@ -319,11 +323,12 @@ export class StateManager {
       })),
     );
     const updated = this.withKnowledge(state, indexed.records);
-    await this.persist(
+    await this.commit(
+      state,
       updated,
-      async () => {
+      async (session) => {
         if (indexed.vectors.length > 0) {
-          await this.vectors.upsertMany(indexed.vectors);
+          await this.writeEach(indexed.vectors, session);
         }
       },
       async () => {
@@ -340,9 +345,44 @@ export class StateManager {
   }
 
   async delete(stateId: string): Promise<void> {
-    await this.require(stateId);
-    await this.vectors.deleteByState(stateId);
-    await this.repository.delete(stateId);
+    const state = await this.repository.get(stateId);
+    if (!state) {
+      await this.vectors.deleteByState(stateId);
+      return;
+    }
+
+    const snapshots: KnowledgeVector[] = [];
+    for (const item of state.knowledge) {
+      const stored = await this.vectors.get(stateId, item.id);
+      if (stored) {
+        snapshots.push(stored);
+      }
+    }
+
+    const transactional = sharedTransaction(this.repository, this.vectors);
+    if (transactional) {
+      await transactional.runInTransaction(async (session) => {
+        const removed = await this.deleteVersion(stateId, state.version, session);
+        if (!removed) {
+          const current = await this.repository.get(stateId, session);
+          throw new VersionConflictError(stateId, state.version, current?.version ?? null);
+        }
+        await this.vectors.deleteByState(stateId, session);
+      });
+      return;
+    }
+
+    const removed = await this.deleteVersion(stateId, state.version);
+    if (!removed) {
+      const current = await this.repository.get(stateId);
+      throw new VersionConflictError(stateId, state.version, current?.version ?? null);
+    }
+    try {
+      await this.vectors.deleteByState(stateId);
+    } catch (error) {
+      await this.restoreDeletedState(state, snapshots, error);
+      throw error;
+    }
   }
 
   private async require(stateId: string): Promise<StateRecord> {
@@ -395,27 +435,187 @@ export class StateManager {
     };
   }
 
-  private async persist(
-    next: StateRecord,
-    writeVectors: () => Promise<void>,
-    rollbackVectors: () => Promise<void>,
+  private async transaction<T>(
+    work: (session?: PersistenceSession) => Promise<T>,
+  ): Promise<T> {
+    const transactional = sharedTransaction(this.repository, this.vectors);
+    if (!transactional) {
+      return work(undefined);
+    }
+    return transactional.runInTransaction(work);
+  }
+
+  private async insertState(record: StateRecord, session?: PersistenceSession): Promise<void> {
+    if (this.repository.insert) {
+      await this.repository.insert(record, session);
+      return;
+    }
+    const existing = await this.repository.get(record.id, session);
+    if (existing) {
+      throw new DuplicateStateError(record.id);
+    }
+    await this.repository.save(record, session);
+  }
+
+  private async writeEach(
+    vectors: KnowledgeVector[],
+    session?: PersistenceSession,
   ): Promise<void> {
-    const previous = await this.repository.get(next.id);
-    await this.repository.save(next);
+    if (session) {
+      await this.vectors.upsertMany(vectors, session);
+      return;
+    }
+    const stateId = vectors[0]?.stateId ?? "";
+    const written: string[] = [];
     try {
-      await writeVectors();
+      for (const vector of vectors) {
+        written.push(vector.knowledgeId);
+        await this.vectors.upsert(vector);
+      }
     } catch (error) {
-      if (previous) {
-        await this.repository.save(previous);
-      }
-      try {
-        await rollbackVectors();
-      } catch {
-        // Keep the original vector-write error.
-      }
+      await this.compensateCreate(stateId, written, error);
       throw error;
     }
   }
+
+  private async compensateCreate(
+    stateId: string,
+    writtenKnowledgeIds: string[],
+    cause: unknown,
+  ): Promise<void> {
+    const failures: unknown[] = [];
+    for (const knowledgeId of writtenKnowledgeIds) {
+      try {
+        await this.vectors.delete(stateId, knowledgeId);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    try {
+      await this.repository.delete(stateId);
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length > 0) {
+      throw new PersistenceError(
+        `Persistence failed and compensation could not remove the partial State ${stateId}. ${describeError(cause)} Compensation: ${failures.map(describeError).join(" ")}`,
+      );
+    }
+  }
+
+  private async commit(
+    previous: StateRecord,
+    next: StateRecord,
+    writeVectors: (session?: PersistenceSession) => Promise<void>,
+    rollbackVectors: () => Promise<void>,
+  ): Promise<void> {
+    const transactional = sharedTransaction(this.repository, this.vectors);
+    if (transactional) {
+      await transactional.runInTransaction(async (session) => {
+        await this.writeVersion(next, previous.version, session);
+        await writeVectors(session);
+      });
+      return;
+    }
+
+    await this.writeVersion(next, previous.version);
+    try {
+      await writeVectors();
+    } catch (error) {
+      await this.compensateUpdate(previous, next.version, rollbackVectors, error);
+      throw error;
+    }
+  }
+
+  private async writeVersion(
+    next: StateRecord,
+    expectedVersion: number,
+    session?: PersistenceSession,
+  ): Promise<void> {
+    if (this.repository.compareAndSave) {
+      const saved = await this.repository.compareAndSave(next, expectedVersion, session);
+      if (!saved) {
+        const current = await this.repository.get(next.id, session);
+        throw new VersionConflictError(next.id, expectedVersion, current?.version ?? null);
+      }
+      return;
+    }
+    const current = await this.repository.get(next.id, session);
+    if (!current || current.version !== expectedVersion) {
+      throw new VersionConflictError(next.id, expectedVersion, current?.version ?? null);
+    }
+    await this.repository.save(next, session);
+  }
+
+  private async compensateUpdate(
+    previous: StateRecord,
+    writtenVersion: number,
+    rollbackVectors: () => Promise<void>,
+    cause: unknown,
+  ): Promise<void> {
+    let restored = false;
+    try {
+      if (this.repository.compareAndSave) {
+        restored = await this.repository.compareAndSave(previous, writtenVersion);
+      } else {
+        await this.repository.save(previous);
+        restored = true;
+      }
+    } catch (error) {
+      throw new PersistenceError(
+        `Vector write failed and the State ${previous.id} could not be restored. ${describeError(cause)} Restore: ${describeError(error)}`,
+      );
+    }
+    try {
+      await rollbackVectors();
+    } catch (error) {
+      throw new PersistenceError(
+        `Vector write failed and the vector rollback also failed. ${describeError(cause)} Rollback: ${describeError(error)}`,
+      );
+    }
+    if (!restored) {
+      throw new PersistenceError(
+        `Vector write failed and State ${previous.id} changed again before it could be restored. ${describeError(cause)}`,
+      );
+    }
+  }
+
+  private async deleteVersion(
+    stateId: string,
+    expectedVersion: number,
+    session?: PersistenceSession,
+  ): Promise<boolean> {
+    if (this.repository.deleteIfVersion) {
+      return this.repository.deleteIfVersion(stateId, expectedVersion, session);
+    }
+    const current = await this.repository.get(stateId, session);
+    if (!current || current.version !== expectedVersion) {
+      return false;
+    }
+    await this.repository.delete(stateId, session);
+    return true;
+  }
+
+  private async restoreDeletedState(
+    state: StateRecord,
+    snapshots: KnowledgeVector[],
+    cause: unknown,
+  ): Promise<void> {
+    try {
+      await this.repository.save(state);
+      if (snapshots.length > 0) {
+        await this.vectors.upsertMany(snapshots);
+      }
+    } catch (error) {
+      throw new PersistenceError(
+        `State ${state.id} was removed and could not be restored after a vector delete failure. ${describeError(cause)} Restore: ${describeError(error)}`,
+      );
+    }
+  }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function assertStateIdentity(id: string, name: string): void {

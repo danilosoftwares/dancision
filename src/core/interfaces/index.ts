@@ -7,6 +7,10 @@ export type {
 } from "./decision-strategy.js";
 export type { StateRepository } from "./state-repository.js";
 export type {
+  PersistenceSession,
+  Transactional,
+} from "../persistence/transaction.js";
+export type {
   KnowledgeVector,
   ScoredKnowledge,
   VectorSearchInput,

@@ -1,6 +1,7 @@
 export {
   DecisionEngine,
   type DecisionEngineOptions,
+  type PersistenceDiagnostic,
 } from "./core/engine/decision-engine.js";
 export {
   DecisionEngineError,
@@ -13,6 +14,7 @@ export {
   InvalidThresholdError,
   InvalidVectorError,
   KnowledgeNotFoundError,
+  VersionConflictError,
   PersistenceError,
   SchemaMismatchError,
   StateNotFoundError,
@@ -67,8 +69,10 @@ export type {
   EmbeddingProvider,
   KnowledgeVector,
   ScoredKnowledge,
+  PersistenceSession,
   StateRepository,
   StrategyContext,
+  Transactional,
   VectorSearchInput,
   VectorStore,
 } from "./core/interfaces/index.js";
@@ -125,3 +129,8 @@ export {
   type EvidenceVerdictKind,
 } from "./evidence/evidence-engine.js";
 export { cosineMeasure } from "./strategies/similarity/similarity-measure.js";
+export {
+  polarityBalancedRetrieval,
+  type EvidenceRetrieval,
+  type EvidenceRetrievalInput,
+} from "./retrieval/polarity-retrieval.js";

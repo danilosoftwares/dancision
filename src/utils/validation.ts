@@ -34,6 +34,9 @@ export function validateThresholds(thresholds: DecisionThresholds): void {
   if (!Number.isInteger(thresholds.topK) || thresholds.topK < 1) {
     throw new InvalidThresholdError("topK must be an integer greater than or equal to 1.");
   }
+  assertOptionalCount(thresholds.positiveTopK, "positiveTopK");
+  assertOptionalCount(thresholds.negativeTopK, "negativeTopK");
+  assertOptionalCount(thresholds.neutralTopK, "neutralTopK");
   if (!["sum", "mean", "peak"].includes(thresholds.aggregation)) {
     throw new InvalidThresholdError("aggregation must be sum, mean, or peak.");
   }
@@ -176,6 +179,17 @@ function assertLabels(values: string[], label: string): void {
 
 export function isPolarity(value: string): value is Polarity {
   return value === "positive" || value === "negative" || value === "neutral";
+}
+
+function assertOptionalCount(value: number | undefined, label: string): void {
+  if (value === undefined) {
+    return;
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    throw new InvalidThresholdError(
+      `${label} must be an integer greater than or equal to 0.`,
+    );
+  }
 }
 
 function assertUnitInterval(value: number, label: string): void {

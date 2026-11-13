@@ -12,7 +12,6 @@ import {
   IncompatibleDimensionsError,
   IncompatibleModelError,
   InvalidDecisionError,
-  PersistenceError,
   StateNotFoundError,
 } from "../errors/index.js";
 import type {
@@ -42,6 +41,17 @@ import { StateManager } from "../../state/state-manager.js";
 import { cosineMeasure } from "../../strategies/similarity/similarity-measure.js";
 import { createThresholdPolicy } from "../../strategies/thresholds/threshold-policy.js";
 import { validateScale } from "../../utils/validation.js";
+import {
+  polarityBalancedRetrieval,
+  type EvidenceRetrieval,
+} from "../../retrieval/polarity-retrieval.js";
+
+export interface PersistenceDiagnostic {
+  kind: "orphan-vector" | "foreign-state";
+  stateId: string;
+  knowledgeId: string;
+  detail: string;
+}
 
 export interface DecisionEngineOptions {
   embeddings: EmbeddingProvider;
@@ -50,6 +60,8 @@ export interface DecisionEngineOptions {
   cache?: EmbeddingCache;
   thresholds?: Partial<DecisionThresholds>;
   audit?: AuditLog;
+  retrieval?: EvidenceRetrieval;
+  onDiagnostic?: (event: PersistenceDiagnostic) => void;
 }
 
 export class DecisionEngine {
@@ -59,6 +71,8 @@ export class DecisionEngine {
   private readonly vectors: VectorStore;
   private readonly embeddingService: EmbeddingService;
   private readonly thresholds: DecisionThresholds;
+  private readonly retrieval: EvidenceRetrieval;
+  private readonly onDiagnostic?: (event: PersistenceDiagnostic) => void;
   private readonly registry = new DecisionRegistry();
 
   constructor(options: DecisionEngineOptions) {
@@ -66,6 +80,8 @@ export class DecisionEngine {
     this.vectors = options.vectors;
     this.thresholds = createThresholdPolicy(options.thresholds);
     this.audit = options.audit;
+    this.retrieval = options.retrieval ?? polarityBalancedRetrieval;
+    this.onDiagnostic = options.onDiagnostic;
     this.embeddingService = new EmbeddingService(options.embeddings, options.cache);
     this.states = new StateManager(
       options.states,
@@ -227,14 +243,17 @@ export class DecisionEngine {
       const retrieved =
         state.knowledge.length === 0
           ? []
-          : await this.vectors.search({
-              stateId: request.stateId,
-              vector: questionVector,
+          : await this.retrieval.retrieve({
+              state,
+              questionVector,
               modelId: this.embeddings.modelId,
-              limit: this.thresholds.topK,
+              thresholds: this.thresholds,
+              vectors: this.vectors,
+              ...(question.categories === undefined
+                ? {}
+                : { questionCategories: question.categories }),
             });
-      assertSearchIsolation(retrieved, request.stateId);
-      const knowledge = enrichKnowledge(retrieved, state);
+      const knowledge = enrichKnowledge(retrieved, state, (event) => this.onDiagnostic?.(event));
       const context: StrategyContext = {
         question,
         questionVector,
@@ -277,20 +296,41 @@ export class DecisionEngine {
   }
 }
 
-function enrichKnowledge(items: ScoredKnowledge[], state: StateRecord): ScoredKnowledge[] {
+function enrichKnowledge(
+  items: ScoredKnowledge[],
+  state: StateRecord,
+  report: (event: PersistenceDiagnostic) => void,
+): ScoredKnowledge[] {
   const byId = new Map(state.knowledge.map((item) => [item.id, item]));
-  return items.map((item) => {
+  const kept: ScoredKnowledge[] = [];
+  for (const item of items) {
+    if (item.stateId !== state.id) {
+      report({
+        kind: "foreign-state",
+        stateId: state.id,
+        knowledgeId: item.knowledgeId,
+        detail: `VectorStore returned knowledge from another State: ${item.stateId}. The item was ignored.`,
+      });
+      continue;
+    }
     const record = byId.get(item.knowledgeId);
     if (!record) {
-      return item;
+      report({
+        kind: "orphan-vector",
+        stateId: state.id,
+        knowledgeId: item.knowledgeId,
+        detail: `Vector ${item.knowledgeId} has no knowledge in State ${state.id}. The item was ignored.`,
+      });
+      continue;
     }
-    return {
+    kept.push({
       ...item,
       content: record.content,
       polarity: record.polarity,
       ...knowledgeAttributes(record),
-    };
-  });
+    });
+  }
+  return kept;
 }
 
 function conditionMet(question: DecisionQuestion, answers: DecisionAnswer[]): boolean {
@@ -482,16 +522,6 @@ function assertStateCompatible(state: StateRecord, provider: EmbeddingProvider):
     }
     if (item.dimensions !== provider.dimensions) {
       throw new IncompatibleDimensionsError(provider.dimensions, item.dimensions);
-    }
-  }
-}
-
-function assertSearchIsolation(items: ScoredKnowledge[], stateId: string): void {
-  for (const item of items) {
-    if (item.stateId !== stateId) {
-      throw new PersistenceError(
-        `VectorStore returned knowledge from another State: ${item.stateId}.`,
-      );
     }
   }
 }

@@ -1,4 +1,5 @@
 import type { Polarity } from "../types/knowledge.js";
+import type { PersistenceSession } from "../persistence/transaction.js";
 
 export interface KnowledgeVector {
   stateId: string;
@@ -21,6 +22,8 @@ export interface VectorSearchInput {
   vector: number[];
   modelId: string;
   limit?: number;
+  polarity?: Polarity;
+  knowledgeIds?: readonly string[];
 }
 
 export interface ScoredKnowledge {
@@ -41,10 +44,14 @@ export interface ScoredKnowledge {
 }
 
 export interface VectorStore {
-  upsert(vector: KnowledgeVector): Promise<void>;
-  upsertMany(vectors: KnowledgeVector[]): Promise<void>;
+  upsert(vector: KnowledgeVector, session?: PersistenceSession): Promise<void>;
+  upsertMany(vectors: KnowledgeVector[], session?: PersistenceSession): Promise<void>;
   search(input: VectorSearchInput): Promise<ScoredKnowledge[]>;
-  get(stateId: string, knowledgeId: string): Promise<KnowledgeVector | null>;
-  delete(stateId: string, knowledgeId: string): Promise<void>;
-  deleteByState(stateId: string): Promise<void>;
+  get(
+    stateId: string,
+    knowledgeId: string,
+    session?: PersistenceSession,
+  ): Promise<KnowledgeVector | null>;
+  delete(stateId: string, knowledgeId: string, session?: PersistenceSession): Promise<void>;
+  deleteByState(stateId: string, session?: PersistenceSession): Promise<void>;
 }

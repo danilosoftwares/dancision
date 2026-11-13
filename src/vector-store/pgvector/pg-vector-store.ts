@@ -10,6 +10,8 @@ import {
   PersistenceError,
 } from "../../core/errors/index.js";
 import { pgTableNames, qualify, type PgQueryable, type PgSchemaConfig } from "./identifiers.js";
+import { PgTransactionCoordinator } from "./pg-transaction.js";
+import type { PersistenceSession } from "../../core/persistence/transaction.js";
 import { assertPolarity, assertValidVector, parseVectorLiteral, toVectorLiteral } from "../../utils/vector.js";
 
 interface KnowledgeRow {
@@ -33,15 +35,24 @@ export class PgVectorStore implements VectorStore {
     private readonly db: PgQueryable,
     config: PgSchemaConfig,
     private readonly ready: () => Promise<void>,
+    private readonly transactions: PgTransactionCoordinator,
   ) {
     this.table = qualify(config.schema, pgTableNames(config).knowledge);
     this.dimensions = config.dimensions;
   }
 
-  async upsert(vector: KnowledgeVector): Promise<void> {
+  get transactionKey(): string {
+    return this.transactions.transactionKey;
+  }
+
+  runInTransaction<T>(work: (session: PersistenceSession) => Promise<T>): Promise<T> {
+    return this.transactions.runInTransaction(work);
+  }
+
+  async upsert(vector: KnowledgeVector, session?: PersistenceSession): Promise<void> {
     await this.ready();
     this.assertStorable(vector);
-    await this.db.query(
+    await this.query(session)(
       `
         INSERT INTO ${this.table} (
           state_id,
@@ -77,12 +88,12 @@ export class PgVectorStore implements VectorStore {
     );
   }
 
-  async upsertMany(vectors: KnowledgeVector[]): Promise<void> {
+  async upsertMany(vectors: KnowledgeVector[], session?: PersistenceSession): Promise<void> {
     for (const vector of vectors) {
       this.assertStorable(vector);
     }
     for (const vector of vectors) {
-      await this.upsert(vector);
+      await this.upsert(vector, session);
     }
   }
 
@@ -98,6 +109,15 @@ export class PgVectorStore implements VectorStore {
       input.stateId,
       input.modelId,
     ];
+    const filters = ["state_id = $2", "model_id = $3"];
+    if (input.polarity !== undefined) {
+      params.push(input.polarity);
+      filters.push(`polarity = $${params.length}`);
+    }
+    if (input.knowledgeIds !== undefined) {
+      params.push(input.knowledgeIds);
+      filters.push(`knowledge_id = ANY($${params.length}::text[])`);
+    }
     let limitSql = "";
     if (input.limit !== undefined) {
       params.push(input.limit);
@@ -118,8 +138,7 @@ export class PgVectorStore implements VectorStore {
           embedding::text AS embedding,
           1 - (embedding <=> $1::vector) AS similarity
         FROM ${this.table}
-        WHERE state_id = $2
-          AND model_id = $3
+        WHERE ${filters.join("\n          AND ")}
         ORDER BY embedding <=> $1::vector, knowledge_id ASC
         ${limitSql}
       `,
@@ -129,9 +148,13 @@ export class PgVectorStore implements VectorStore {
     return result.rows.map((row) => this.mapScored(row));
   }
 
-  async get(stateId: string, knowledgeId: string): Promise<KnowledgeVector | null> {
+  async get(
+    stateId: string,
+    knowledgeId: string,
+    session?: PersistenceSession,
+  ): Promise<KnowledgeVector | null> {
     await this.ready();
-    const result = await this.db.query<KnowledgeRow>(
+    const result = await this.query(session)<KnowledgeRow>(
       `
         SELECT
           state_id,
@@ -155,17 +178,25 @@ export class PgVectorStore implements VectorStore {
     return this.mapVector(row);
   }
 
-  async delete(stateId: string, knowledgeId: string): Promise<void> {
+  async delete(
+    stateId: string,
+    knowledgeId: string,
+    session?: PersistenceSession,
+  ): Promise<void> {
     await this.ready();
-    await this.db.query(
+    await this.query(session)(
       `DELETE FROM ${this.table} WHERE state_id = $1 AND knowledge_id = $2`,
       [stateId, knowledgeId],
     );
   }
 
-  async deleteByState(stateId: string): Promise<void> {
+  async deleteByState(stateId: string, session?: PersistenceSession): Promise<void> {
     await this.ready();
-    await this.db.query(`DELETE FROM ${this.table} WHERE state_id = $1`, [stateId]);
+    await this.query(session)(`DELETE FROM ${this.table} WHERE state_id = $1`, [stateId]);
+  }
+
+  private query(session?: PersistenceSession): PgQueryable["query"] {
+    return this.transactions.queryFor(session);
   }
 
   private assertStorable(vector: KnowledgeVector): void {
